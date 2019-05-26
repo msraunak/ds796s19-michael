@@ -46,4 +46,5 @@ renaming_dict = {
     'subflow_bwd_pkts': 'subflow_bwd_pkts',
     'subflow_bwd_byts': 'subflow_bwd_bytes',
     'init_fwd_win_byts': 'init_win_bytes_fwd',
-    'init_bwd_win_byts': 'init_win_bytes_bwd'}
+    'init_bwd_win_byts': 'init_win_bytes_bwd',
+    'Label': 'label'}

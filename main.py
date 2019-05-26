@@ -7,14 +7,14 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.exceptions import NotFittedError
+import matplotlib.pyplot as plt
+import warnings
 from IDS import IDS
 from rename_columns import renaming_dict
 from model_evaluation import evaluate_model
 from reduce_dataset import map_dict
-import warnings
-import matplotlib.pyplot as plt
 warnings.filterwarnings("ignore")
+
 
 np.random.seed(1234)
 PATH = os.environ.get("CICIDS_PROJECT")
@@ -120,6 +120,7 @@ def partition_dataFrame(df):
     assert(len(l1.intersection(l2)) == 0)
 
     # benign/normal activity: 0, malicious activity: 1
+    global label_conversion
     label_conversion = lambda x: 0 if x == 'BENIGN' else 1
     y_train = y_train.apply(label_conversion)
     y_test = y_test.apply(label_conversion)
@@ -192,13 +193,12 @@ plt.legend(fontsize=20)
 plt.show()
 
 # columns to retain determined by examining RF feature selection results
-cols_to_retain = ['subflow_fwd_bytes', 'total_len_of_bwd_pkts', 'psh_flag_count',
-                  'pkt_len_std', 'init_win_bytes_fwd', 'flow_iat_mean',
-                  'flow_iat_std', 'bwd_pkt_len_mean', 'total_len_of_fwd_pkts',
-                  'subflow_bwd_bytes', 'avg_pkt_size', 'bwd_seg_size_avg',
-                  'flow_bytes/s', 'pkt_len_mean', 'bwd_header_len',
-                  'pkt_len_variance', 'bwd_pkt_len_std', 'init_win_bytes_bwd']
-
+cols_to_retain = ['fwd_seg_size_avg', 'max_pkt_len', 'flow_iat_mean',
+                  'subflow_fwd_bytes', 'flow_iat_max', 'init_win_bytes_fwd',
+                  'total_bwd_pkts', 'fwd_pkt_len_max', 'avg_pkt_size',
+                  'pkt_len_variance', 'bwd_seg_size_avg', 'bwd_header_len',
+                  'pkt_len_std', 'bwd_pkt_len_mean', 'pkt_len_mean',
+                  'bwd_pkt_len_std', 'init_win_bytes_bwd']
 
 ##################
 ## HYPOTHESIS 1 ##
@@ -442,6 +442,7 @@ def reformat(path):
     # the following two columns are read in by Pandas as type "object" but should be type "float"
     df['flow_bytes/s'] = df['flow_bytes/s'].astype('float64')
     df['flow_pkts/s'] = df['flow_pkts/s'].astype('float64')
+    labels = df.loc[:, "label"]
     df = df.loc[:, cols_to_retain]
     for col in df.columns:
         # get average of non-nan values for imputing missing values
@@ -456,37 +457,106 @@ def reformat(path):
             # impute infinity values
             df[col] = df[col].map(map_dict({float('inf'): max_val}))
 
-    return df
+    return (df, labels)
 
-external_benign_data = reformat(os.path.join(PATH, "External_Data", "external_benign.csv"))
-external_malicious_data = reformat(os.path.join(PATH, "External_Data", "external_malicious.csv"))
-external_benign_labels = np.repeat(0, external_benign_data.shape[0])
-external_malicious_labels = np.repeat(1, external_malicious_data.shape[0])
 
-malicious_indexes = labels[(labels == "Bot") | (labels == "Heartbleed") | (labels == "DoS GoldenEye")].index
-benign_indexes = labels[labels == "BENIGN"].index
-# reduce the number of benign examples
-benign_indexes = np.random.choice(benign_indexes, len(malicious_indexes), replace=False)
+# get the external data/labels
+external_benign_data, external_benign_labels = reformat(os.path.join(PATH, "External_Data",
+                                                                     "external_benign.csv"))
+external_malicious_data, external_malicious_labels = reformat(os.path.join(PATH, "External_Data",
+                                                                           "external_malicious.csv"))
+external_data = external_benign_data.append(external_malicious_data)
+external_labels = external_benign_labels.append(external_malicious_labels)
+external_data.reset_index(drop=True, inplace=True)
+external_labels.reset_index(drop=True, inplace=True)
+
+# isolate the indexes of examples with a class label featured in the external dataset
+cic_indexes = {}
+select_labels = labels[
+    (labels == "Bot") | (labels == "Heartbleed") | (labels == "DoS GoldenEye") | (labels == "BENIGN")]
+for index in select_labels.index:
+    label = labels.loc[index]
+    if label not in cic_indexes.keys():
+        cic_indexes[label] = [index]
+    else:
+        cic_indexes[label].append(index)
+
+# split into train & test sets based on class label
+cic_train = {}
+cic_test = {}
+for key in cic_indexes.keys():
+    cic_test[key] = list(np.random.choice(cic_indexes[key],
+                                          size=int(np.ceil(0.40 * len(cic_indexes[key]))),
+                                          replace=False))
+    cic_train[key] = list(set(cic_indexes[key]) - set(cic_test[key]))
+
+# for test sets -> determine the minimum amount of examples per class label between CICIDS2017 & external datasets
+label_count = {}
+for key in cic_test.keys():
+    label_count[key] = min(len(cic_test[key]), external_labels.value_counts()[key])
+
+cic_train_indexes = []
+cic_test_indexes = []
+for key in cic_train:
+    cic_train_indexes.extend(cic_train[key])
+    cic_test_indexes.extend(cic_test[key])
+cic_test_data = data.loc[cic_test_indexes, :]
+cic_test_labels = labels.loc[cic_test_indexes]
+other_malicious_indexes = list(
+    labels[(labels != "Bot") & (labels != "Heartbleed") & (labels != "DoS GoldenEye") & (labels != "BENIGN")].index)
 
 # data & labels for training a model on a reduced dataset
-reduced_df = data.loc[(list(malicious_indexes) + list(benign_indexes)), :]
-reduced_labels = pd.Series(index=(list(malicious_indexes) + list(benign_indexes)))
-reduced_labels.loc[malicious_indexes] = 1
-reduced_labels.loc[benign_indexes] = 0
+reduced_df = data.loc[cic_train_indexes, :]
+reduced_labels = labels.loc[cic_train_indexes].apply(label_conversion)
 # vs total set of labels
-complete_labels = labels.apply(lambda x: 0 if x == 'BENIGN' else 1)
-
-rf_complete = RandomForestClassifier(n_estimators=50)
-rf_complete.fit(data.values, complete_labels.values.ravel())
-rf_reduced = RandomForestClassifier(n_estimators=50)
+complete_df = data.loc[cic_train_indexes + other_malicious_indexes, :]
+complete_labels = labels.loc[cic_train_indexes + other_malicious_indexes].apply(label_conversion)
+# train random forest using reduced data
+rf_reduced = RandomForestClassifier(n_estimators=50, random_state=0)
 rf_reduced.fit(reduced_df.values, reduced_labels.values.ravel())
+# train random forest using non-reduced data
+rf_complete = RandomForestClassifier(n_estimators=50, random_state=0)
+rf_complete.fit(complete_df.values, complete_labels.values.ravel())
+
+accum_results = {"cic": {"model 1": {"accuracy": 0.0, "precision": 0.0, "recall": 0.0},
+                         "model 2": {"accuracy": 0.0, "precision": 0.0, "recall": 0.0}},
+                 "external": {"model 1": {"accuracy": 0.0, "precision": 0.0, "recall": 0.0},
+                              "model 2": {"accuracy": 0.0, "precision": 0.0, "recall": 0.0}}}
 
 title = "Test of Generalizability"
-print("\n{}\n".format(title) + "-"*len(title))
-print("\nComplete RF")
-print("\tBenign Accuracy:", rf_complete.score(external_benign_data.values, external_benign_labels))
-print("\tMalicious Accuracy:", rf_complete.score(external_malicious_data.values, external_malicious_labels))
-print("\nReduced RF")
-print("\tBenign Accuracy:", rf_reduced.score(external_benign_data.values, external_benign_labels))
-print("\tMalicious Accuracy:", rf_reduced.score(external_malicious_data.values, external_malicious_labels))
+print("\n{}\n\n".format(title) + "-" * len(title))
+NUM_ITERATIONS = 50
+for i in range(NUM_ITERATIONS):
+    temp_indexes_cic = []
+    temp_indexes_external = []
+    for key in external_labels.value_counts().keys():
+        temp_indexes_cic.extend(list(np.random.choice(cic_test_labels[cic_test_labels == key].index,
+                                                      label_count[key], replace=False)))
+        temp_indexes_external.extend(list(np.random.choice(external_labels[external_labels == key].index,
+                                                           label_count[key], replace=False)))
+    converted_labels_cic = labels.loc[temp_indexes_cic].apply(label_conversion)
+    converted_labels_external = external_labels.loc[temp_indexes_external].apply(label_conversion)
+    for dataset in accum_results:
+        print("\n" + "=" * 30)
+        print("Control") if dataset == "cic" else print('Test')
+        print("=" * 30)
+        info = {"cic": [data, converted_labels_cic, temp_indexes_cic],
+                "external": [external_data, converted_labels_external, temp_indexes_external]}[dataset]
+        title = "Complete RF"
+        print("\n{}\n".format(title) + "-" * len(title))
+        rf_complete_preds = rf_complete.predict(info[0].loc[info[2], :].values)
+        rf_complete_indexes = evaluate_model(rf_complete_preds, info[1])
+        title = "Reduced RF"
+        print("\n\n{}\n".format(title) + "-" * len(title))
+        rf_reduced_preds = rf_reduced.predict(info[0].loc[info[2], :].values)
+        rf_reduced_indexes = evaluate_model(rf_reduced_preds, info[1])
 
+        for model in accum_results[dataset]:
+            rf_indexes = {"model 1": rf_complete_indexes, "model 2": rf_reduced_indexes}[model]
+            for key in accum_results[dataset][model]:
+                accum_results[dataset][model][key] = accum_results[dataset][model][key] + rf_indexes[key]
+
+for dataset in accum_results:
+    for model in accum_results[dataset]:
+        for key in accum_results[dataset][model]:
+            accum_results[dataset][model][key] = accum_results[dataset][model][key] / NUM_ITERATIONS
